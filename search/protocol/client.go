@@ -3,11 +3,14 @@ package protocol
 import (
   "fmt"
   "io"
-  "log"
   "time"
   "strings"
   "net/rpc"
+  "bufio"
+  "strconv"
+  "os"
   "encoding/json"
+  "log"
 )
 
 import (
@@ -27,6 +30,7 @@ import (
 import (
   "github.com/fatih/color"
 )
+
 
 type UnderhoodAnswer struct {
   EmbAnswer underhood.HintAnswer
@@ -96,22 +100,21 @@ func RunClient(coordinatorAddr string, conf *config.Config) {
   hint := c.getHint(true /* keep conn */, coordinatorAddr)
   c.Setup(hint)
   logHintSize(hint)
-
+  cases := readIntListFromFile("/home/nsklab/yyh/similar/tiptoe/search/mydata/data/rank_result/output.txt")
+  facts := readLines("/home/nsklab/yyh/similar/tiptoe/search/mydata/data/rank_result/facts.txt")
   in, out := embeddings.SetupEmbeddingProcess(c.NumClusters(), conf)
   col := color.New(color.FgYellow).Add(color.Bold)
-
   for {
     c.stepCount = 1
     c.printStep("Running client preprocessing")
     perf := c.preprocessRound(coordinatorAddr, true /* verbose */, true /* keep conn */)
-
     col.Printf("Enter private search query: ")
     text := utils.ReadLineFromStdin()
     fmt.Printf("\n\n")
     if (strings.TrimSpace(text) == "") || (strings.TrimSpace(text) == "quit") {
       break
     }
-    c.runRound(perf, in, out, text, coordinatorAddr, true /* verbose */, true /* keep conn */)
+    c.runRound0(cases,facts,perf, in, out, text, coordinatorAddr, true /* verbose */, true /* keep conn */)
   }
 
   if c.rpcClient != nil {
@@ -133,7 +136,7 @@ func (c *Client) preprocessRound(coordinatorAddr string, verbose, keepConn bool)
   p.tOffline, p.upOffline, p.downOffline = logOfflineStats(c.NumDocs(), networkingStart, ct, offlineAns)
 
   c.ProcessHintApply(offlineAns)
-
+              
   p.clientPreproc = time.Since(start).Seconds()
 
   if verbose {
@@ -143,10 +146,109 @@ func (c *Client) preprocessRound(coordinatorAddr string, verbose, keepConn bool)
   return p
 }
 
+
 func (c *Client) runRound(p Perf, in io.WriteCloser, out io.ReadCloser, 
-                          text, coordinatorAddr string, verbose, keepConn bool) Perf {
+  text, coordinatorAddr string, verbose, keepConn bool) Perf {
+y := color.New(color.FgYellow, color.Bold)
+fmt.Printf("Executing query \"%s\"\n", y.Sprintf(text))
+
+// Build embeddings query
+start := time.Now()
+if verbose {
+c.printStep("Generating embedding of the query")
+}
+
+var query struct {
+Cluster_index uint64
+Emb           []int8
+}
+query.Cluster_index = 0
+query.Emb = readIntegersFromFile("/home/nsklab/yyh/similar/tiptoe/search/mydata/data/q_emb.txt",2)
+
+if query.Cluster_index >= uint64(c.NumClusters()) {
+panic("Should not happen")
+}
+
+if verbose {
+c.printStep(fmt.Sprintf("Building PIR query for cluster %d", query.Cluster_index))
+}
+
+embQuery := c.QueryEmbeddings(query.Emb, query.Cluster_index)
+p.clientSetup = time.Since(start).Seconds()
+
+// Send embeddings query to server
+if verbose {
+c.printStep("Sending SimplePIR query to server")
+}
+networkingStart := time.Now()
+embAns := c.getEmbeddingsAnswer(embQuery, true /* keep conn */, coordinatorAddr)
+p.t1, p.up1, p.down1 = logStats(c.params.NumDocs, networkingStart, embQuery, embAns)
+
+// Recover document and URL chunk to query for
+c.printStep("Decrypting server answer")
+embDec := c.ReconstructEmbeddingsWithinCluster(embAns, query.Cluster_index)
+scores := embeddings.SmoothResults(embDec, c.embInfo.P())
+
+print("\nlen(score):",len(scores),"\n")
+docIndex := maxIndex(scores)
+indicesByScore := utils.SortByScores(scores)
+if verbose {
+fmt.Printf("\tDoc %d within cluster %d has the largest inner product with our query\n",
+docIndex, query.Cluster_index)
+c.printStep(fmt.Sprintf("Building PIR query for url/title of doc %d in cluster %d",
+docIndex, query.Cluster_index))
+}
+
+// Build URL query
+urlQuery, retrievedChunk := c.QueryUrls(query.Cluster_index, docIndex)
+
+// Send URL query to server
+if verbose {
+c.printStep(fmt.Sprintf("Sending PIR query to server for chunk %d", retrievedChunk))
+}
+networkingStart = time.Now()
+urlAns := c.getUrlsAnswer(urlQuery, keepConn, coordinatorAddr)
+p.t2, p.up2, p.down2 = logStats(c.params.NumDocs, networkingStart, urlQuery, urlAns)
+
+// Recover URLs of top 10 docs in chunk
+urls := c.ReconstructUrls(urlAns, query.Cluster_index, docIndex)
+if verbose {
+c.printStep("Reconstructed PIR answers.")
+fmt.Printf("\tThe top 10 retrieved urls are:\n")
+}
+
+j := 1
+for at := 0; at < len(indicesByScore); at++ {
+if scores[at] == 0 {
+break
+}
+
+doc := indicesByScore[at]
+_, chunk, index := c.urlMap.SubclusterToIndex(query.Cluster_index, doc)
+
+if chunk == retrievedChunk {
+if verbose {
+fmt.Printf("\t% 3d) [score %s] %s\n", j,
+color.YellowString(fmt.Sprintf("% 4d", scores[at])),
+color.BlueString(corpus.GetIthUrl(urls, index)))
+}
+j += 1
+if j > 10 {
+break
+}
+}
+}
+
+p.clientTotal = time.Since(start).Seconds()
+fmt.Printf("\tAnswered in:\n\t\t%v (preproc)\n\t\t%v (client)\n\t\t%v (round 1)\n\t\t%v (round 2)\n\t\t%v (total)\n---\n",
+p.clientPreproc, p.clientSetup, p.t1, p.t2, p.clientTotal)
+
+return p
+}
+
+func (c *Client) runRound0(cases []int,facts []string,p Perf, in io.WriteCloser, out io.ReadCloser, 
+                          text, coordinatorAddr string, verbose, keepConn bool){
   y := color.New(color.FgYellow, color.Bold)
-  fmt.Printf("Executing query \"%s\"\n", y.Sprintf(text))
 
   // Build embeddings query
   start := time.Now()
@@ -158,8 +260,7 @@ func (c *Client) runRound(p Perf, in io.WriteCloser, out io.ReadCloser,
     Cluster_index uint64
     Emb           []int8
   }
-
-  io.WriteString(in, text + "\n") // send query to embedding process
+  io.WriteString(in, text + "\n")
   if err := json.NewDecoder(out).Decode(&query); err != nil { // get back embedding + cluster
     log.Printf("Did you remember to set up your python venv?")
     panic(err)
@@ -178,7 +279,7 @@ func (c *Client) runRound(p Perf, in io.WriteCloser, out io.ReadCloser,
 
   // Send embeddings query to server
   if verbose {
-    c.printStep("Sending SimplePIR query to server")
+    c.printStep("Sending query to server")
   }
   networkingStart := time.Now()
   embAns := c.getEmbeddingsAnswer(embQuery, true /* keep conn */, coordinatorAddr)
@@ -188,61 +289,16 @@ func (c *Client) runRound(p Perf, in io.WriteCloser, out io.ReadCloser,
   c.printStep("Decrypting server answer")
   embDec := c.ReconstructEmbeddingsWithinCluster(embAns, query.Cluster_index)
   scores := embeddings.SmoothResults(embDec, c.embInfo.P())
-  indicesByScore := utils.SortByScores(scores)
-  docIndex := indicesByScore[0]
 
+  docIndex := maxIndex(scores)
+  fact := facts[docIndex]
+  docIndex = uint64(cases[docIndex])
   if verbose {
-    fmt.Printf("\tDoc %d within cluster %d has the largest inner product with our query\n",
-               docIndex, query.Cluster_index)
-    c.printStep(fmt.Sprintf("Building PIR query for url/title of doc %d in cluster %d",
-               docIndex, query.Cluster_index))
+    y.Printf("\tDoc %d has the largest inner product with our query\n",
+               docIndex)
+    print(fact)
   }
 
-  // Build URL query
-  urlQuery, retrievedChunk := c.QueryUrls(query.Cluster_index, docIndex)
-
-  // Send URL query to server
-  if verbose {
-    c.printStep(fmt.Sprintf("Sending PIR query to server for chunk %d", retrievedChunk))
-  }
-  networkingStart = time.Now()
-  urlAns := c.getUrlsAnswer(urlQuery, keepConn, coordinatorAddr)
-  p.t2, p.up2, p.down2 = logStats(c.params.NumDocs, networkingStart, urlQuery, urlAns)
-
-  // Recover URLs of top 10 docs in chunk
-  urls := c.ReconstructUrls(urlAns, query.Cluster_index, docIndex)
-  if verbose {
-    c.printStep("Reconstructed PIR answers.")
-    fmt.Printf("\tThe top 10 retrieved urls are:\n")
-  }
-
-  j := 1
-  for at := 0; at < len(indicesByScore); at++ {
-    if scores[at] == 0 {
-      break
-    }
-
-    doc := indicesByScore[at]
-    _, chunk, index := c.urlMap.SubclusterToIndex(query.Cluster_index, doc)
-
-    if chunk == retrievedChunk {
-      if verbose {
-        fmt.Printf("\t% 3d) [score %s] %s\n", j,
-                   color.YellowString(fmt.Sprintf("% 4d", scores[at])),
-                   color.BlueString(corpus.GetIthUrl(urls, index)))
-      }
-      j += 1
-      if j > 10 {
-        break
-      }
-    }
-  }
-
-  p.clientTotal = time.Since(start).Seconds()
-  fmt.Printf("\tAnswered in:\n\t\t%v (preproc)\n\t\t%v (client)\n\t\t%v (round 1)\n\t\t%v (round 2)\n\t\t%v (total)\n---\n",
-              p.clientPreproc, p.clientSetup, p.t1, p.t2, p.clientTotal)
- 
-  return p
 }
 
 func (c *Client) Setup(hint *TiptoeHint) {
@@ -368,30 +424,47 @@ func (c *Client) QueryUrls(clusterIndex, docIndex uint64) (*pir.Query[matrix.Ele
 func (c *Client) ReconstructEmbeddings(answer *pir.Answer[matrix.Elem64], 
                                        clusterIndex uint64) uint64 {
   vals := c.embClient.RecoverLHE(answer)
-
   dbIndex := c.embMap.ClusterToIndex(uint(clusterIndex))
   rowIndex, _ := database.Decompose(dbIndex, c.embInfo.M)
+  print("\nrowindex:",rowIndex,"\n")
   res := vals.Get(rowIndex, 0)
 
   return uint64(res)
 }
 
+func (c *Client) checkans(answer *pir.Answer[matrix.Elem64], 
+  clusterIndex, p uint64, corp *corpus.Corpus, emb []int8){
+  vals := c.embClient.RecoverLHE(answer)
+  for i:= uint64(0); i < uint64(len(vals.Data())); i++ {
+    dbIndex := c.embMap.ClusterToIndex(uint(i))
+    rowIndex, _ := database.Decompose(dbIndex, c.embInfo.M)
+    res := vals.Get(rowIndex, 0)
+    docEmb := corp.GetEmbedding(uint64(corp.ClusterToIndex(uint(i))))
+    shouldBe := embeddings.InnerProduct(docEmb, emb)
+    if int(res) != shouldBe {
+      fmt.Printf("Recovering doc %d: got %d instead of %d\n",
+                 i, res, shouldBe)
+      panic("Bad answer")
+    }
+  }
+}
+
 func (c *Client) ReconstructEmbeddingsWithinCluster(answer *pir.Answer[matrix.Elem64], 
                                                     clusterIndex uint64) []uint64 {
-  dbIndex := c.embMap.ClusterToIndex(uint(clusterIndex))
-  rowStart, colIndex := database.Decompose(dbIndex, c.embInfo.M)
-  rowEnd := database.FindEnd(c.embIndices, rowStart, colIndex,
-                             c.embInfo.M, c.embInfo.L, 0)
-
+  //dbIndex := c.embMap.ClusterToIndex(uint(clusterIndex))
+  //rowStart, _ := database.Decompose(dbIndex, c.embInfo.M)
+  //rowEnd := database.FindEnd(c.embIndices, rowStart, colIndex,
+                             //c.embInfo.M, c.embInfo.L, 0)
+    
   vals := c.embClient.RecoverLHE(answer)
-
-  res := make([]uint64, rowEnd - rowStart)
+  res := make([]uint64, len(vals.Data()))
   at := 0
-  for j := rowStart; j < rowEnd; j++ {
-    res[at] = uint64(vals.Get(j, 0))
+  for j := uint64(0); j < uint64(len(vals.Data())); j++ {
+    dbIndex := c.embMap.ClusterToIndex(uint(j))
+    rowIndex, _ := database.Decompose(dbIndex, c.embInfo.M)
+    res[at] = uint64(vals.Get(rowIndex, 0))
     at += 1
   }
-
   return res
 }
 
@@ -492,4 +565,93 @@ func (c *Client) closeConn() {
     c.rpcClient.Close()
     c.rpcClient = nil
   }
+}
+
+func readIntListFromFile(filename string) []int {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	var intList []int
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		num, err := strconv.Atoi(scanner.Text())
+		if err != nil {
+			return nil
+		}
+		intList = append(intList, num)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil
+	}
+	return intList
+}
+
+func readLines(filename string) []string {
+  file, err := os.Open(filename)
+  if err != nil {
+      return nil
+  }
+  defer file.Close()
+
+  var lines []string
+  scanner := bufio.NewScanner(file)
+  for scanner.Scan() {
+      lines = append(lines, scanner.Text())
+  }
+  if err := scanner.Err(); err != nil {
+      return nil
+  }
+
+  return lines
+}
+
+func readIntegersFromFile(filePath string, linenumber int) ([]int8) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	var lineCount int
+	for scanner.Scan() {
+		lineCount++
+		if lineCount == linenumber {
+			line := scanner.Text()
+			fields := strings.Fields(line)
+
+			var integers []int8
+
+			for _, field := range fields {
+				num, err := strconv.Atoi(field)
+				if err != nil {
+					return nil
+				}
+				integers = append(integers, int8(num))
+			}
+			return integers
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil
+	}
+	return nil
+}
+func maxIndex(nums []int) uint64 {
+	if len(nums) == 0 {
+    print("\nbad")
+		return 0 // 返回 -1 表示列表为空
+	}
+
+	maxIdx := uint64(0) // 假设列表中第一个元素为最大值的索引
+	maxVal := nums[0]
+  for j := uint64(0); j < uint64(len(nums)); j++ {
+    if nums[j] > maxVal{
+      maxVal = nums[j]
+      maxIdx = j
+    }
+  }
+	return maxIdx
 }

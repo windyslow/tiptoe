@@ -1,9 +1,8 @@
 import sys
 import numpy
-import faiss
 import time
 import json
-from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModel
 
 # New size for the embeddings
 NUM_CLUSTERS = 1
@@ -38,23 +37,15 @@ def main():
     if len(sys.argv) != 3:
         raise ValueError("Usage: %s preamble num_clusters" % sys.argv[0])
 
-    #start1 = time.time()
-    preamble = sys.argv[1]
-    num_clusters = int(sys.argv[2])
-
-    clusterfile = CENTROIDS_FILE % preamble
-    f1 = open(clusterfile, "rb")
-    index = faiss.read_index(clusterfile)
-    f1.close()
 
     # Alternative (with file instead of FAISS)
     #centroids = numpy.loadtxt(CENTROIDS_FILE)
     #centroids = numpy.round(centroids * (1 << prec))
 
-    components = numpy.load(PCA_COMPONENTS_FILE % preamble)
+    components = numpy.load("/home/nsklab/yyh/similar/tiptoe/search/mydata/data/pca_192.npy")
 
-    model_name="msmarco-distilbert-base-tas-b" 
-    model = SentenceTransformer(model_name)
+    tokenizer = AutoTokenizer.from_pretrained("/home/nsklab/yyh/similar/LeCaRDv2/Lawformer/Lawformer")
+    model = AutoModel.from_pretrained("/home/nsklab/yyh/similar/LeCaRDv2/Lawformer/Lawformer")
 
     #end1 = time.time()
     #print("Setup: ", end1-start1)
@@ -62,21 +53,16 @@ def main():
 
     for line in sys.stdin:
         line = line.rstrip()
+        inputs = tokenizer(line, return_tensors="pt")
+        outputs = model(**inputs)
+        v = outputs.last_hidden_state[0, 0].tolist()
+        v = numpy.array(v)
+        v = numpy.round(v * (1 << prec)).astype('int') 
 
-        #start2 = time.time()
-        v = model.encode(line)
-        v = numpy.round(v * (1 << prec)).astype('int') # WHY NOT JUST KEEP MORE PRECISION EARLIER ON?
-        #end2 = time.time()
-        #print("Embedding: ", end2-start2)
-
-        result = find_nearest_clusters(index, [v], num_clusters)
-        #result = find_nearest_clusters_from_file(centroids, [v], num_clusters)
-
-        #end3 = time.time()
         #print("Find closest cluster: ", end3-end2)
 
         out = numpy.clip(numpy.round(numpy.matmul(v, components)/10), -16, 15).astype('int')
-        sys.stdout.write(json.dumps({"Cluster_index": int(result), "Emb": out.tolist()}))
+        sys.stdout.write(json.dumps({"Cluster_index": int(1), "Emb": out.tolist()}))
         sys.stdout.flush()
         #end4 = time.time()
         #print("PCA: ", end4-end3)

@@ -18,12 +18,11 @@ func SetupEmbeddingProcess(numClusters int, conf *config.Config) (io.WriteCloser
     preamble += "cluster_centroids/"
   }
 
-  toRun := "embeddings/embed_text.py"
+  toRun := "/home/nsklab/yyh/similar/tiptoe/search/embeddings/embed_text.py"
   if conf.IMAGE_SEARCH() {
     toRun = "embeddings/embed_img.py"
   }
-
-  cmd := exec.Command("python3", toRun, preamble, strconv.Itoa(numClusters))
+  cmd := exec.Command("python", toRun, preamble, strconv.Itoa(numClusters))
   stdin, err1 := cmd.StdinPipe()
   if err1 != nil {
     panic(err1)
