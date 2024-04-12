@@ -18,7 +18,7 @@ func SetupEmbeddingProcess(numClusters int, conf *config.Config) (io.WriteCloser
     preamble += "cluster_centroids/"
   }
 
-  toRun := "/home/nsklab/yyh/similar/tiptoe/search/embeddings/embed_text.py"
+  toRun := "embeddings/embed_text0.py"
   if conf.IMAGE_SEARCH() {
     toRun = "embeddings/embed_img.py"
   }

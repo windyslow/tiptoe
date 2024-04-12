@@ -1,6 +1,0 @@
-*.npy
-__pycache__
-*.model
-*.txt
-venv
-cache

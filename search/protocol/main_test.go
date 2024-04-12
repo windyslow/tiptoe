@@ -3,7 +3,7 @@ package protocol
 import (
   "flag"
   "testing"
-  "runtime/debug"
+  //"runtime/debug"
 )
 
 import (
@@ -26,16 +26,16 @@ var conf *config.Config
 
 // Client talks to servers over TCP, to coordinator over TLS
 func TestMain(m *testing.M) {
-  s = serverInit()
-  s2 = serverInit()
-  k = coordinatorInit()
+  //s = serverInit()
+  //s2 = serverInit()
+  //k = coordinatorInit()
 
-  go s.Serve(utils.ServerPort)
-  go s2.Serve(utils.ServerPort2)
-  go k.Serve(utils.CoordinatorPort)
+  //go s.Serve(utils.ServerPort)
+  //go s2.Serve(utils.ServerPort2)
+  //go k.Serve(utils.CoordinatorPort)
 
-  conf = config.MakeConfig(*preamble + "/data/", false /* image search */)
+  //conf = config.MakeConfig(*preamble + "/data/", false /* image search */)
 
-  debug.SetMemoryLimit(28 * 2^(30)) // 28 GiB of RAM
+  //debug.SetMemoryLimit(28 * 2^(30)) // 28 GiB of RAM
   m.Run()
 }
